@@ -8,7 +8,7 @@ Lokální desktopová aplikace v Pythonu/Tkinteru pro tvorbu zasedacího pořád
 - přidávat a deaktivovat žáky
 - ručně rozmisťovat žáky klikáním
 - náhodně rozmístit žáky (`random` mód)
-- najít výhodnější kombinaci z nasbíraných dat (`smart` mód)
+- najít výhodnější kombinaci z nasbíraných dat (`smart` mód: best-of-random + lokální výměny)
 - uzamknout konkrétní usazení pro další generování
 - po hodině ohodnotit celé rozesazení a jen vybrané žáky
 - průběžně ukládat párové a poziční skóre do SQLite

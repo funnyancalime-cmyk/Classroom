@@ -44,6 +44,6 @@
 
 - [x] lokální heslo k aplikaci
 - [ ] jemnější model sousedství a vah
-- [ ] silnější optimalizační jádro než best-of-random
+- [x] silnější optimalizační jádro než best-of-random
 - [x] filtr a přehled vztahů pro vybraného žáka
 - [x] archivace / mazání starých dat podle období

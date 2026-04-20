@@ -726,7 +726,37 @@ class SeatingEngine:
         if best is None:
             best = self.random_arrangement()
             best_score = self.score_arrangement(best)
+        best, best_score = self.improve_by_swaps(best, best_score, rounds=2)
         return best, best_score
+
+    def improve_by_swaps(self, assignments: dict[int, int | None], base_score: float | None = None, rounds: int = 2):
+        if base_score is None:
+            base_score = self.score_arrangement(assignments)
+        current = dict(assignments)
+        current_score = float(base_score)
+
+        movable_seats = [seat_id for seat_id in current.keys() if seat_id not in self.locked]
+        if len(movable_seats) < 2:
+            return current, current_score
+
+        for _ in range(max(1, rounds)):
+            improved = False
+            for i in range(len(movable_seats)):
+                for j in range(i + 1, len(movable_seats)):
+                    a = movable_seats[i]
+                    b = movable_seats[j]
+                    if current.get(a) == current.get(b):
+                        continue
+                    trial = dict(current)
+                    trial[a], trial[b] = trial.get(b), trial.get(a)
+                    score = self.score_arrangement(trial)
+                    if score > current_score:
+                        current = trial
+                        current_score = score
+                        improved = True
+            if not improved:
+                break
+        return current, current_score
 
 
 class RatingDialog(tk.Toplevel):

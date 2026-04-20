@@ -79,6 +79,23 @@ class SeatingEngineTests(unittest.TestCase):
         self.assertGreater(SeatingEngine.recommend_iterations(10, 10), 600)
         self.assertEqual(SeatingEngine.recommend_iterations(100, 120), 5000)
 
+    def test_improve_by_swaps_does_not_reduce_score_and_respects_locks(self):
+        pair_scores = {(10, 11, "side"): (2.0, 3)}
+        engine = SeatingEngine(
+            seats=self.seats,
+            students=self.students,
+            pair_scores=pair_scores,
+            seat_scores={},
+            locked={1: 10},
+        )
+        # Base arrangement keeps locked seat 1 occupied by student 10.
+        base = {1: 10, 2: 12, 3: 11, 4: None}
+        base_score = engine.score_arrangement(base)
+        improved, improved_score = engine.improve_by_swaps(base, base_score, rounds=2)
+
+        self.assertEqual(improved[1], 10)
+        self.assertGreaterEqual(improved_score, base_score)
+
 
 if __name__ == "__main__":
     unittest.main()
