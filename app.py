@@ -1,16 +1,29 @@
 import json
+import importlib.util
 import random
+import shutil
 import sqlite3
+import hashlib
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog, simpledialog
+
+REPORTLAB_AVAILABLE = importlib.util.find_spec("reportlab") is not None
+if REPORTLAB_AVAILABLE:
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.units import mm
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 APP_DIR = Path(__file__).resolve().parent
 DB_PATH = APP_DIR / "seating_app.db"
-
+PIN_HASH_SETTING_KEY = "app_pin_hash"
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -108,7 +121,26 @@ CREATE TABLE IF NOT EXISTS locked_seats (
     FOREIGN KEY(seat_id) REFERENCES seats(id) ON DELETE CASCADE,
     FOREIGN KEY(student_id) REFERENCES students(id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
+
+FONT_NAME = "Helvetica"
+if REPORTLAB_AVAILABLE:
+    for _font_path in [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+    ]:
+        if Path(_font_path).exists():
+            try:
+                pdfmetrics.registerFont(TTFont("DejaVuSans", _font_path))
+                FONT_NAME = "DejaVuSans"
+                break
+            except Exception:
+                pass
 
 
 @dataclass(frozen=True)
@@ -127,6 +159,129 @@ class Student:
     is_active: bool
 
 
+def hash_pin(pin: str) -> str:
+    return hashlib.sha256(pin.encode("utf-8")).hexdigest()
+
+
+def export_arrangement_pdf(
+    output_path: str | Path,
+    classroom_name: str,
+    mode: str,
+    score: float,
+    seats: list[Seat],
+    assignments: dict[int, int | None],
+    student_names_by_id: dict[int, str],
+    analysis: dict | None = None,
+):
+    if not REPORTLAB_AVAILABLE:
+        raise RuntimeError("PDF export vyžaduje knihovnu reportlab. Nainstaluj ji příkazem: pip install reportlab")
+    output_path = str(output_path)
+    doc = SimpleDocTemplate(
+        output_path,
+        pagesize=landscape(A4),
+        leftMargin=12 * mm,
+        rightMargin=12 * mm,
+        topMargin=12 * mm,
+        bottomMargin=12 * mm,
+    )
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "TitleCZ", parent=styles["Title"], fontName=FONT_NAME, fontSize=18, leading=22, spaceAfter=8
+    )
+    body_style = ParagraphStyle(
+        "BodyCZ", parent=styles["BodyText"], fontName=FONT_NAME, fontSize=9, leading=11, spaceAfter=3
+    )
+    small_style = ParagraphStyle(
+        "SmallCZ", parent=styles["BodyText"], fontName=FONT_NAME, fontSize=8, leading=10, spaceAfter=2
+    )
+
+    story = []
+    seat_map = {seat.id: seat for seat in seats}
+    max_row = max((seat.row_index for seat in seats), default=0)
+    max_col = max((seat.col_index for seat in seats), default=0)
+
+    story.append(Paragraph("Zasedací pořádek", title_style))
+    story.append(
+        Paragraph(
+            f"Třída: <b>{classroom_name}</b> - režim: <b>{mode}</b> - skóre návrhu: <b>{score:.2f}</b> - export: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+            body_style,
+        )
+    )
+    story.append(Spacer(1, 4 * mm))
+
+    grid = []
+    for r in range(max_row + 1):
+        row = []
+        for c in range(max_col + 1):
+            seat = next((s for s in seats if s.row_index == r and s.col_index == c), None)
+            if seat is None:
+                row.append(Paragraph("", small_style))
+            elif not seat.is_active:
+                row.append(Paragraph(f"<b>{seat.label}</b><br/>neaktivní", small_style))
+            else:
+                student_id = assignments.get(seat.id)
+                student_name = student_names_by_id.get(student_id, "-") if student_id else "-"
+                row.append(Paragraph(f"<b>{seat.label}</b><br/>{student_name}", body_style))
+        grid.append(row)
+
+    col_count = max(max_col + 1, 1)
+    total_table_width = 260 * mm
+    col_width = total_table_width / col_count
+    table = Table(grid, colWidths=[col_width] * col_count)
+    style_cmds = [
+        ("FONTNAME", (0, 0), (-1, -1), FONT_NAME),
+        ("FONTSIZE", (0, 0), (-1, -1), 9),
+        ("LEADING", (0, 0), (-1, -1), 11),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#9ca3af")),
+        ("LEFTPADDING", (0, 0), (-1, -1), 5),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+        ("TOPPADDING", (0, 0), (-1, -1), 8),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+    ]
+    for seat in seats:
+        if not seat.is_active:
+            style_cmds.extend(
+                [
+                    ("BACKGROUND", (seat.col_index, seat.row_index), (seat.col_index, seat.row_index), colors.HexColor("#4b5563")),
+                    ("TEXTCOLOR", (seat.col_index, seat.row_index), (seat.col_index, seat.row_index), colors.white),
+                ]
+            )
+        elif assignments.get(seat.id):
+            style_cmds.append(
+                ("BACKGROUND", (seat.col_index, seat.row_index), (seat.col_index, seat.row_index), colors.HexColor("#eff6ff"))
+            )
+    table.setStyle(TableStyle(style_cmds))
+    story.append(table)
+
+    if analysis:
+        story.append(Spacer(1, 5 * mm))
+        story.append(Paragraph("Shrnutí skóre", body_style))
+        story.append(
+            Paragraph(
+                f"Pozice: <b>{analysis.get('seat_total', 0):+.2f}</b> - sousedství: <b>{analysis.get('pair_total', 0):+.2f}</b>",
+                body_style,
+            )
+        )
+        lines = []
+        for term in analysis.get("seat_terms", [])[:6]:
+            seat = seat_map.get(term["seat_id"])
+            seat_label = seat.label if seat else str(term["seat_id"])
+            student_name = student_names_by_id.get(term["student_id"], str(term["student_id"]))
+            lines.append((abs(term["contribution"]), f"Pozice: {student_name} na {seat_label} ({term['contribution']:+.2f})"))
+        for term in analysis.get("pair_terms", [])[:6]:
+            proximity = "vedle sebe" if term["proximity"] == "side" else "před/za"
+            a_name = student_names_by_id.get(term["student_a_id"], str(term["student_a_id"]))
+            b_name = student_names_by_id.get(term["student_b_id"], str(term["student_b_id"]))
+            lines.append((abs(term["contribution"]), f"Dvojice: {a_name} × {b_name}, {proximity} ({term['contribution']:+.2f})"))
+        lines.sort(key=lambda x: x[0], reverse=True)
+        for _, line in lines[:10]:
+            story.append(Paragraph(f"- {line}", small_style))
+
+    doc.build(story)
+
+
 class Database:
     def __init__(self, path: Path):
         self.path = path
@@ -139,9 +294,31 @@ class Database:
         self.conn.close()
 
     def list_classrooms(self):
-        return self.conn.execute(
-            "SELECT id, name, rows_count, cols_count FROM classrooms ORDER BY name"
-        ).fetchall()
+        return self.conn.execute("SELECT id, name, rows_count, cols_count FROM classrooms ORDER BY name").fetchall()
+
+    def get_setting(self, key: str):
+        row = self.conn.execute("SELECT value FROM app_settings WHERE key = ?", (key,)).fetchone()
+        return row["value"] if row else None
+
+    def set_setting(self, key: str, value: str):
+        with self.conn:
+            self.conn.execute(
+                """
+                INSERT INTO app_settings(key, value) VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                (key, value),
+            )
+
+    def delete_arrangements_older_than(self, cutoff_iso: str):
+        with self.conn:
+            row = self.conn.execute(
+                "SELECT COUNT(*) AS cnt FROM arrangements WHERE created_at < ?",
+                (cutoff_iso,),
+            ).fetchone()
+            deleted = int(row["cnt"]) if row else 0
+            self.conn.execute("DELETE FROM arrangements WHERE created_at < ?", (cutoff_iso,))
+        return deleted
 
     def create_classroom(self, name: str, rows_count: int, cols_count: int):
         now = datetime.now().isoformat(timespec="seconds")
@@ -151,13 +328,13 @@ class Database:
                 (name, rows_count, cols_count, now),
             )
             classroom_id = cur.lastrowid
-            labels = []
+            values = []
             for r in range(rows_count):
                 for c in range(cols_count):
-                    label = f"{chr(65 + r)}{c + 1}"
-                    labels.append((classroom_id, r, c, label))
+                    values.append((classroom_id, r, c, f"{chr(65 + r)}{c + 1}"))
             self.conn.executemany(
-                "INSERT INTO seats(classroom_id, row_index, col_index, label) VALUES (?, ?, ?, ?)", labels
+                "INSERT INTO seats(classroom_id, row_index, col_index, label) VALUES (?, ?, ?, ?)",
+                values,
             )
         return classroom_id
 
@@ -238,7 +415,7 @@ class Database:
             )
         return arrangement_id
 
-    def list_recent_arrangements(self, classroom_id: int, limit: int = 10):
+    def list_recent_arrangements(self, classroom_id: int, limit: int = 20):
         return self.conn.execute(
             "SELECT id, created_at, mode, overall_rating FROM arrangements WHERE classroom_id = ? ORDER BY id DESC LIMIT ?",
             (classroom_id, limit),
@@ -246,62 +423,89 @@ class Database:
 
     def get_arrangement_assignments(self, arrangement_id: int):
         rows = self.conn.execute(
-            "SELECT seat_id, student_id FROM arrangement_assignments WHERE arrangement_id = ?",
-            (arrangement_id,),
+            "SELECT seat_id, student_id FROM arrangement_assignments WHERE arrangement_id = ?", (arrangement_id,)
         ).fetchall()
         return {r["seat_id"]: r["student_id"] for r in rows}
 
     def save_feedback(self, arrangement_id: int, overall_rating: int, student_ratings: dict[int, int]):
         with self.conn:
-            self.conn.execute(
-                "UPDATE arrangements SET overall_rating = ? WHERE id = ?",
-                (overall_rating, arrangement_id),
-            )
+            self.conn.execute("UPDATE arrangements SET overall_rating = ? WHERE id = ?", (overall_rating, arrangement_id))
             self.conn.execute("DELETE FROM student_feedback WHERE arrangement_id = ?", (arrangement_id,))
             self.conn.executemany(
                 "INSERT INTO student_feedback(arrangement_id, student_id, rating) VALUES (?, ?, ?)",
-                [(arrangement_id, sid, rating) for sid, rating in student_ratings.items()],
+                [(arrangement_id, student_id, rating) for student_id, rating in student_ratings.items()],
             )
 
-    def _upsert_avg(self, table: str, key_fields: tuple, values: dict):
+    def _upsert_avg(self, table: str, key_fields: tuple, score: float):
         if table == "pair_scores":
-            existing = self.conn.execute(
+            row = self.conn.execute(
                 "SELECT id, avg_score, observations FROM pair_scores WHERE classroom_id=? AND student_a_id=? AND student_b_id=? AND proximity=?",
                 key_fields,
             ).fetchone()
-            if existing:
-                old_avg = float(existing["avg_score"])
-                obs = int(existing["observations"])
-                new_avg = (old_avg * obs + values["score"]) / (obs + 1)
+            if row:
+                obs = int(row["observations"])
+                new_avg = (float(row["avg_score"]) * obs + score) / (obs + 1)
                 self.conn.execute(
-                    "UPDATE pair_scores SET avg_score=?, observations=? WHERE id=?",
-                    (new_avg, obs + 1, existing["id"]),
+                    "UPDATE pair_scores SET avg_score = ?, observations = ? WHERE id = ?",
+                    (new_avg, obs + 1, row["id"]),
                 )
             else:
                 self.conn.execute(
                     "INSERT INTO pair_scores(classroom_id, student_a_id, student_b_id, proximity, avg_score, observations) VALUES (?, ?, ?, ?, ?, 1)",
-                    (*key_fields, values["score"]),
+                    (*key_fields, score),
                 )
         elif table == "seat_scores":
-            existing = self.conn.execute(
+            row = self.conn.execute(
                 "SELECT id, avg_score, observations FROM seat_scores WHERE classroom_id=? AND student_id=? AND seat_id=?",
                 key_fields,
             ).fetchone()
-            if existing:
-                old_avg = float(existing["avg_score"])
-                obs = int(existing["observations"])
-                new_avg = (old_avg * obs + values["score"]) / (obs + 1)
+            if row:
+                obs = int(row["observations"])
+                new_avg = (float(row["avg_score"]) * obs + score) / (obs + 1)
                 self.conn.execute(
-                    "UPDATE seat_scores SET avg_score=?, observations=? WHERE id=?",
-                    (new_avg, obs + 1, existing["id"]),
+                    "UPDATE seat_scores SET avg_score = ?, observations = ? WHERE id = ?",
+                    (new_avg, obs + 1, row["id"]),
                 )
             else:
                 self.conn.execute(
                     "INSERT INTO seat_scores(classroom_id, student_id, seat_id, avg_score, observations) VALUES (?, ?, ?, ?, 1)",
-                    (*key_fields, values["score"]),
+                    (*key_fields, score),
                 )
-        else:
-            raise ValueError("Unsupported table")
+
+    @staticmethod
+    def _build_neighbors(seats: list[Seat]):
+        seat_index = {(seat.row_index, seat.col_index): seat.id for seat in seats if seat.is_active}
+        neighbors = defaultdict(list)
+        for seat in seats:
+            if not seat.is_active:
+                continue
+            for delta, proximity in [
+                ((0, -1), "side"),
+                ((0, 1), "side"),
+                ((-1, 0), "front_back"),
+                ((1, 0), "front_back"),
+                ((-1, -1), "diagonal"),
+                ((-1, 1), "diagonal"),
+                ((1, -1), "diagonal"),
+                ((1, 1), "diagonal"),
+            ]:
+                target = (seat.row_index + delta[0], seat.col_index + delta[1])
+                if target in seat_index:
+                    neighbors[seat.id].append((proximity, seat_index[target]))
+        return neighbors
+
+    @staticmethod
+    def _iter_neighbors(occupied: dict[int, int], neighbors: dict[int, list[tuple[str, int]]], seat_id: int):
+        seen = set()
+        for proximity, other_seat_id in neighbors.get(seat_id, []):
+            other_student_id = occupied.get(other_seat_id)
+            if other_student_id is None:
+                continue
+            key = (proximity, other_student_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            yield proximity, other_student_id
 
     def update_scores_from_feedback(
         self,
@@ -311,86 +515,109 @@ class Database:
         overall_rating: int,
         student_ratings: dict[int, int],
     ):
-        occupied = {sid: stu for sid, stu in assignments.items() if stu is not None}
+        occupied = {seat_id: student_id for seat_id, student_id in assignments.items() if student_id is not None}
         neighbors = self._build_neighbors(seats)
-
         with self.conn:
             if overall_rating != 0:
-                weak = overall_rating * 0.25
+                weak_score = overall_rating * 0.25
                 for seat_id, student_id in occupied.items():
-                    self._upsert_avg("seat_scores", (classroom_id, student_id, seat_id), {"score": weak})
-                    for proximity, other_id in self._iter_neighbors(occupied, neighbors, seat_id):
-                        a, b = sorted((student_id, other_id))
-                        self._upsert_avg(
-                            "pair_scores",
-                            (classroom_id, a, b, proximity),
-                            {"score": weak},
-                        )
+                    self._upsert_avg("seat_scores", (classroom_id, student_id, seat_id), weak_score)
+                    for proximity, other_student_id in self._iter_neighbors(occupied, neighbors, seat_id):
+                        a, b = sorted((student_id, other_student_id))
+                        self._upsert_avg("pair_scores", (classroom_id, a, b, proximity), weak_score)
 
             for student_id, rating in student_ratings.items():
                 if rating == 0:
                     continue
-                seat_id = next((s for s, stu in occupied.items() if stu == student_id), None)
+                seat_id = next((sid for sid, stu_id in occupied.items() if stu_id == student_id), None)
                 if seat_id is None:
                     continue
-                self._upsert_avg("seat_scores", (classroom_id, student_id, seat_id), {"score": rating * 0.8})
-                for proximity, other_id in self._iter_neighbors(occupied, neighbors, seat_id):
-                    a, b = sorted((student_id, other_id))
-                    factor = 1.0 if proximity == "side" else 0.5
-                    self._upsert_avg(
-                        "pair_scores",
-                        (classroom_id, a, b, proximity),
-                        {"score": rating * factor},
-                    )
-
-    def _iter_neighbors(self, occupied: dict[int, int], neighbors: dict[int, list[tuple[str, int]]], seat_id: int):
-        seen = set()
-        for proximity, other_seat_id in neighbors.get(seat_id, []):
-            other_id = occupied.get(other_seat_id)
-            if other_id is None:
-                continue
-            key = (proximity, other_id)
-            if key in seen:
-                continue
-            seen.add(key)
-            yield proximity, other_id
-
-    def _build_neighbors(self, seats: list[Seat]):
-        index = {(seat.row_index, seat.col_index): seat.id for seat in seats if seat.is_active}
-        neighbors = defaultdict(list)
-        for seat in seats:
-            if not seat.is_active:
-                continue
-            for delta, proximity in [((0, -1), "side"), ((0, 1), "side"), ((-1, 0), "front_back"), ((1, 0), "front_back")]:
-                key = (seat.row_index + delta[0], seat.col_index + delta[1])
-                if key in index:
-                    neighbors[seat.id].append((proximity, index[key]))
-        return neighbors
+                self._upsert_avg("seat_scores", (classroom_id, student_id, seat_id), rating * 0.8)
+                for proximity, other_student_id in self._iter_neighbors(occupied, neighbors, seat_id):
+                    factor = 1.0 if proximity == "side" else (0.5 if proximity == "front_back" else 0.35)
+                    a, b = sorted((student_id, other_student_id))
+                    self._upsert_avg("pair_scores", (classroom_id, a, b, proximity), rating * factor)
 
     def load_pair_scores(self, classroom_id: int):
         rows = self.conn.execute(
             "SELECT student_a_id, student_b_id, proximity, avg_score, observations FROM pair_scores WHERE classroom_id = ?",
             (classroom_id,),
         ).fetchall()
-        result = {}
-        for r in rows:
-            result[(r["student_a_id"], r["student_b_id"], r["proximity"])] = (float(r["avg_score"]), int(r["observations"]))
-        return result
+        return {
+            (r["student_a_id"], r["student_b_id"], r["proximity"]): (float(r["avg_score"]), int(r["observations"]))
+            for r in rows
+        }
 
     def load_seat_scores(self, classroom_id: int):
         rows = self.conn.execute(
             "SELECT student_id, seat_id, avg_score, observations FROM seat_scores WHERE classroom_id = ?",
             (classroom_id,),
         ).fetchall()
-        result = {}
-        for r in rows:
-            result[(r["student_id"], r["seat_id"])] = (float(r["avg_score"]), int(r["observations"]))
-        return result
+        return {
+            (r["student_id"], r["seat_id"]): (float(r["avg_score"]), int(r["observations"]))
+            for r in rows
+        }
+
+    def get_student_pair_insights(self, classroom_id: int, student_id: int, limit: int = 30):
+        rows = self.conn.execute(
+            """
+            SELECT
+                CASE
+                    WHEN student_a_id = ? THEN student_b_id
+                    ELSE student_a_id
+                END AS other_student_id,
+                proximity,
+                avg_score,
+                observations
+            FROM pair_scores
+            WHERE classroom_id = ?
+              AND (student_a_id = ? OR student_b_id = ?)
+            ORDER BY avg_score DESC, observations DESC
+            LIMIT ?
+            """,
+            (student_id, classroom_id, student_id, student_id, limit),
+        ).fetchall()
+        return [
+            {
+                "other_student_id": r["other_student_id"],
+                "proximity": r["proximity"],
+                "avg_score": float(r["avg_score"]),
+                "observations": int(r["observations"]),
+            }
+            for r in rows
+        ]
+
+    def get_student_seat_insights(self, classroom_id: int, student_id: int, limit: int = 30):
+        rows = self.conn.execute(
+            """
+            SELECT
+                seat_scores.seat_id,
+                seats.label AS seat_label,
+                seat_scores.avg_score,
+                seat_scores.observations
+            FROM seat_scores
+            JOIN seats ON seats.id = seat_scores.seat_id
+            WHERE seat_scores.classroom_id = ?
+              AND seat_scores.student_id = ?
+            ORDER BY seat_scores.avg_score DESC, seat_scores.observations DESC
+            LIMIT ?
+            """,
+            (classroom_id, student_id, limit),
+        ).fetchall()
+        return [
+            {
+                "seat_id": r["seat_id"],
+                "seat_label": r["seat_label"],
+                "avg_score": float(r["avg_score"]),
+                "observations": int(r["observations"]),
+            }
+            for r in rows
+        ]
 
 
 class SeatingEngine:
-    def __init__(self, seats: list[Seat], students: list[Student], pair_scores, seat_scores, locked: dict[int, int]):
-        self.seats = [s for s in seats if s.is_active]
+    def __init__(self, seats: list[Seat], students: list[Student], pair_scores: dict, seat_scores: dict, locked: dict[int, int]):
+        self.seats = [seat for seat in seats if seat.is_active]
         self.seat_map = {seat.id: seat for seat in self.seats}
         self.students = students
         self.pair_scores = pair_scores
@@ -398,25 +625,34 @@ class SeatingEngine:
         self.locked = {seat_id: student_id for seat_id, student_id in locked.items() if seat_id in self.seat_map}
         self.neighbors = self._build_neighbors(self.seats)
 
-    def _build_neighbors(self, seats: list[Seat]):
-        index = {(seat.row_index, seat.col_index): seat.id for seat in seats}
+    @staticmethod
+    def _build_neighbors(seats: list[Seat]):
+        seat_index = {(seat.row_index, seat.col_index): seat.id for seat in seats}
         neighbors = defaultdict(list)
         for seat in seats:
-            for delta, proximity in [((0, -1), "side"), ((0, 1), "side"), ((-1, 0), "front_back"), ((1, 0), "front_back")]:
-                key = (seat.row_index + delta[0], seat.col_index + delta[1])
-                if key in index:
-                    neighbors[seat.id].append((proximity, index[key]))
+            for delta, proximity in [
+                ((0, -1), "side"),
+                ((0, 1), "side"),
+                ((-1, 0), "front_back"),
+                ((1, 0), "front_back"),
+                ((-1, -1), "diagonal"),
+                ((-1, 1), "diagonal"),
+                ((1, -1), "diagonal"),
+                ((1, 1), "diagonal"),
+            ]:
+                target = (seat.row_index + delta[0], seat.col_index + delta[1])
+                if target in seat_index:
+                    neighbors[seat.id].append((proximity, seat_index[target]))
         return neighbors
 
     def random_arrangement(self):
         assignments = {seat.id: None for seat in self.seats}
         locked_student_ids = set(self.locked.values())
-        unlocked_students = [stu.id for stu in self.students if stu.id not in locked_student_ids]
+        unlocked_students = [student.id for student in self.students if student.id not in locked_student_ids]
         unlocked_seats = [seat.id for seat in self.seats if seat.id not in self.locked]
 
         for seat_id, student_id in self.locked.items():
             assignments[seat_id] = student_id
-
         random.shuffle(unlocked_students)
         for seat_id, student_id in zip(unlocked_seats, unlocked_students):
             assignments[seat_id] = student_id
@@ -431,23 +667,21 @@ class SeatingEngine:
         for seat_id, student_id in assignments.items():
             if student_id is None or seat_id not in self.seat_map:
                 continue
-            seat_score = self.seat_scores.get((student_id, seat_id))
-            if seat_score:
-                avg, obs = seat_score
+            data = self.seat_scores.get((student_id, seat_id))
+            if data:
+                avg, obs = data
                 contribution = avg * (1 + min(obs, 5) * 0.1)
                 seat_total += contribution
-                seat_terms.append(
-                    {
-                        "type": "seat",
-                        "seat_id": seat_id,
-                        "student_id": student_id,
-                        "contribution": contribution,
-                        "avg": avg,
-                        "observations": obs,
-                    }
-                )
+                seat_terms.append({
+                    "type": "seat",
+                    "seat_id": seat_id,
+                    "student_id": student_id,
+                    "contribution": contribution,
+                    "avg": avg,
+                    "observations": obs,
+                })
 
-        visited_pairs = set()
+        visited = set()
         for seat_id, student_id in assignments.items():
             if student_id is None or seat_id not in self.seat_map:
                 continue
@@ -456,34 +690,31 @@ class SeatingEngine:
                 if other_student_id is None:
                     continue
                 a, b = sorted((student_id, other_student_id))
-                pair_key = (a, b, proximity)
-                if pair_key in visited_pairs:
+                key = (a, b, proximity)
+                if key in visited:
                     continue
-                visited_pairs.add(pair_key)
-                pair_score = self.pair_scores.get(pair_key)
-                if pair_score:
-                    avg, obs = pair_score
+                visited.add(key)
+                data = self.pair_scores.get(key)
+                if data:
+                    avg, obs = data
                     contribution = avg * (1 + min(obs, 5) * 0.15)
                     pair_total += contribution
-                    pair_terms.append(
-                        {
-                            "type": "pair",
-                            "student_a_id": a,
-                            "student_b_id": b,
-                            "seat_a_id": seat_id,
-                            "seat_b_id": other_seat_id,
-                            "proximity": proximity,
-                            "contribution": contribution,
-                            "avg": avg,
-                            "observations": obs,
-                        }
-                    )
+                    pair_terms.append({
+                        "type": "pair",
+                        "student_a_id": a,
+                        "student_b_id": b,
+                        "seat_a_id": seat_id,
+                        "seat_b_id": other_seat_id,
+                        "proximity": proximity,
+                        "contribution": contribution,
+                        "avg": avg,
+                        "observations": obs,
+                    })
 
-        total = seat_total + pair_total
         seat_terms.sort(key=lambda x: x["contribution"], reverse=True)
         pair_terms.sort(key=lambda x: x["contribution"], reverse=True)
         return {
-            "total": total,
+            "total": seat_total + pair_total,
             "seat_total": seat_total,
             "pair_total": pair_total,
             "seat_terms": seat_terms,
@@ -493,7 +724,15 @@ class SeatingEngine:
     def score_arrangement(self, assignments: dict[int, int | None]):
         return self.analyze_arrangement(assignments)["total"]
 
-    def best_of_random_search(self, iterations: int = 2000):
+    @staticmethod
+    def recommend_iterations(student_count: int, active_seat_count: int) -> int:
+        # Heuristika: víc žáků/aktivních míst => víc náhodných pokusů.
+        # Udržujeme bezpečné meze kvůli plynulosti GUI.
+        base = max(student_count, active_seat_count, 1)
+        iterations = 400 + base * 120
+        return max(600, min(iterations, 5000))
+
+    def best_of_random_search(self, iterations: int = 2500):
         best = None
         best_score = float("-inf")
         for _ in range(iterations):
@@ -505,7 +744,37 @@ class SeatingEngine:
         if best is None:
             best = self.random_arrangement()
             best_score = self.score_arrangement(best)
+        best, best_score = self.improve_by_swaps(best, best_score, rounds=2)
         return best, best_score
+
+    def improve_by_swaps(self, assignments: dict[int, int | None], base_score: float | None = None, rounds: int = 2):
+        if base_score is None:
+            base_score = self.score_arrangement(assignments)
+        current = dict(assignments)
+        current_score = float(base_score)
+
+        movable_seats = [seat_id for seat_id in current.keys() if seat_id not in self.locked]
+        if len(movable_seats) < 2:
+            return current, current_score
+
+        for _ in range(max(1, rounds)):
+            improved = False
+            for i in range(len(movable_seats)):
+                for j in range(i + 1, len(movable_seats)):
+                    a = movable_seats[i]
+                    b = movable_seats[j]
+                    if current.get(a) == current.get(b):
+                        continue
+                    trial = dict(current)
+                    trial[a], trial[b] = trial.get(b), trial.get(a)
+                    score = self.score_arrangement(trial)
+                    if score > current_score:
+                        current = trial
+                        current_score = score
+                        improved = True
+            if not improved:
+                break
+        return current, current_score
 
 
 class RatingDialog(tk.Toplevel):
@@ -532,17 +801,17 @@ class RatingDialog(tk.Toplevel):
         canvas.grid(row=2, column=0, columnspan=2, sticky="nsew", padx=(10, 0), pady=5)
         scrollbar.grid(row=2, column=2, sticky="ns", pady=5, padx=(0, 10))
 
-        for idx, stu in enumerate(students):
-            ttk.Label(inner, text=student_names_by_id[stu.id]).grid(row=idx, column=0, sticky="w", padx=6, pady=2)
+        for idx, student in enumerate(students):
+            ttk.Label(inner, text=student_names_by_id[student.id]).grid(row=idx, column=0, sticky="w", padx=6, pady=2)
             var = tk.StringVar(value="")
-            self.student_rating_vars[stu.id] = var
+            self.student_rating_vars[student.id] = var
             cb = ttk.Combobox(inner, values=["", "-2", "-1", "0", "+1", "+2"], textvariable=var, width=6, state="readonly")
             cb.grid(row=idx, column=1, sticky="w", padx=6, pady=2)
 
-        button_frame = ttk.Frame(self)
-        button_frame.grid(row=3, column=0, columnspan=3, sticky="e", padx=10, pady=10)
-        ttk.Button(button_frame, text="Uložit", command=self.on_save).pack(side="right", padx=4)
-        ttk.Button(button_frame, text="Zrušit", command=self.on_cancel).pack(side="right", padx=4)
+        buttons = ttk.Frame(self)
+        buttons.grid(row=3, column=0, columnspan=3, sticky="e", padx=10, pady=10)
+        ttk.Button(buttons, text="Uložit", command=self.on_save).pack(side="right", padx=4)
+        ttk.Button(buttons, text="Zrušit", command=self.on_cancel).pack(side="right", padx=4)
 
         self.columnconfigure(0, weight=1)
         self.rowconfigure(2, weight=1)
@@ -554,10 +823,7 @@ class RatingDialog(tk.Toplevel):
             if not value:
                 continue
             student_ratings[student_id] = int(value.replace("+", ""))
-        self.result = {
-            "overall": int(self.overall_var.get()),
-            "student_ratings": student_ratings,
-        }
+        self.result = {"overall": int(self.overall_var.get()), "student_ratings": student_ratings}
         self.destroy()
 
     def on_cancel(self):
@@ -568,8 +834,8 @@ class RatingDialog(tk.Toplevel):
 class SeatingApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Zasedací pořádek – lokální MVP")
-        self.geometry("1380x820")
+        self.title("Zasedací pořádek - lokální aplikace")
+        self.geometry("1450x840")
 
         self.db = Database(DB_PATH)
         self.current_classroom_id = None
@@ -578,16 +844,17 @@ class SeatingApp(tk.Tk):
         self.selected_student_id = None
         self.locked_assignments: dict[int, int] = {}
         self.layout_edit_mode = False
+        self.last_analysis = None
 
         self.classrooms_by_label = {}
         self.students_cache: list[Student] = []
         self.seats_cache: list[Seat] = []
-        self.student_names_by_id = {}
+        self.student_names_by_id: dict[int, str] = {}
         self.seat_buttons = {}
-        self.last_analysis = None
 
         self.create_widgets()
         self.refresh_classrooms()
+        self.after(10, self.ensure_unlocked_on_start)
 
     def create_widgets(self):
         root = ttk.Frame(self, padding=10)
@@ -628,14 +895,22 @@ class SeatingApp(tk.Tk):
         ttk.Button(actions, text="Vyčistit", command=self.clear_assignments).pack(side="left", padx=6, pady=8)
         ttk.Button(actions, text="Uložit zámky", command=self.save_locks).pack(side="left", padx=6, pady=8)
         ttk.Button(actions, text="Ohodnotit tuto hodinu", command=self.rate_current_arrangement).pack(side="left", padx=6, pady=8)
+        ttk.Button(actions, text="Přehled žáka", command=self.show_selected_student_insights).pack(side="left", padx=6, pady=8)
 
         self.layout_button_var = tk.StringVar(value="Upravit učebnu")
         ttk.Button(actions, textvariable=self.layout_button_var, command=self.toggle_layout_edit_mode).pack(side="left", padx=(18, 6), pady=8)
         ttk.Button(actions, text="Zapnout všechna místa", command=self.activate_all_seats).pack(side="left", padx=6, pady=8)
+        export_pdf_btn = ttk.Button(actions, text="Export PDF", command=self.export_current_pdf)
+        export_pdf_btn.pack(side="left", padx=(18, 6), pady=8)
+        if not REPORTLAB_AVAILABLE:
+            export_pdf_btn.state(["disabled"])
+        ttk.Button(actions, text="Záloha DB", command=self.backup_database).pack(side="left", padx=6, pady=8)
+        ttk.Button(actions, text="Obnovit DB", command=self.restore_database).pack(side="left", padx=6, pady=8)
+        ttk.Button(actions, text="Nastavení", command=self.open_settings_dialog).pack(side="left", padx=(18, 6), pady=8)
 
         help_text = (
-            "Normální režim: vyber žáka vlevo → klikni na místo v plánku.\n"
-            "Dvojklik na místo = zamknout/odemknout obsazení. V režimu učebny kliknutím vypínáš/zapínáš místa."
+            "Normální režim: vyber žáka vlevo a klikni na místo.\n"
+            "Dvojklik na místo = zamknout/odemknout. V režimu učebny klikáním vypínáš a zapínáš místa."
         )
         ttk.Label(actions, text=help_text).pack(side="left", padx=16)
 
@@ -646,7 +921,7 @@ class SeatingApp(tk.Tk):
         status_box.pack(fill="x", pady=(0, 10))
         self.mode_var = tk.StringVar(value="Režim: manual")
         self.score_var = tk.StringVar(value="Skóre návrhu: 0.00")
-        self.selected_var = tk.StringVar(value="Vybraný žák: —")
+        self.selected_var = tk.StringVar(value="Vybraný žák: -")
         self.layout_mode_var = tk.StringVar(value="Režim učebny: vypnutý")
         self.active_seats_var = tk.StringVar(value="Aktivní místa: 0")
         ttk.Label(status_box, textvariable=self.mode_var).pack(anchor="w", padx=8, pady=(8, 3))
@@ -676,13 +951,13 @@ class SeatingApp(tk.Tk):
         self.explanation_tree.heading("item", text="Položka")
         self.explanation_tree.heading("score", text="Body")
         self.explanation_tree.column("type", width=80)
-        self.explanation_tree.column("item", width=230)
+        self.explanation_tree.column("item", width=240)
         self.explanation_tree.column("score", width=70, anchor="e")
         self.explanation_tree.pack(fill="both", expand=True, padx=8, pady=(0, 8))
 
     def refresh_classrooms(self):
         classrooms = self.db.list_classrooms()
-        labels = [f"{r['name']} ({r['rows_count']}×{r['cols_count']})" for r in classrooms]
+        labels = [f"{row['name']} ({row['rows_count']}×{row['cols_count']})" for row in classrooms]
         self.classrooms_by_label = {label: row["id"] for label, row in zip(labels, classrooms)}
         self.classroom_combo["values"] = labels
         if labels and not self.classroom_combo.get():
@@ -724,10 +999,10 @@ class SeatingApp(tk.Tk):
                     break
             self.on_select_classroom()
 
-        button_frame = ttk.Frame(dialog)
-        button_frame.grid(row=3, column=0, columnspan=2, sticky="e", padx=10, pady=10)
-        ttk.Button(button_frame, text="Vytvořit", command=create_and_close).pack(side="right", padx=4)
-        ttk.Button(button_frame, text="Zrušit", command=dialog.destroy).pack(side="right", padx=4)
+        buttons = ttk.Frame(dialog)
+        buttons.grid(row=3, column=0, columnspan=2, sticky="e", padx=10, pady=10)
+        ttk.Button(buttons, text="Vytvořit", command=create_and_close).pack(side="right", padx=4)
+        ttk.Button(buttons, text="Zrušit", command=dialog.destroy).pack(side="right", padx=4)
 
     def normalize_assignments(self):
         active_seat_ids = {seat.id for seat in self.seats_cache if seat.is_active}
@@ -760,7 +1035,6 @@ class SeatingApp(tk.Tk):
         self.refresh_history()
         self.recompute_score()
         self.mode_var.set("Režim: manual")
-        self.active_seats_var.set(f"Aktivní místa: {sum(1 for seat in self.seats_cache if seat.is_active)}")
 
     def refresh_students_list(self):
         self.students_list.delete(0, tk.END)
@@ -795,11 +1069,13 @@ class SeatingApp(tk.Tk):
         self.update_grid_visuals()
 
     def format_seat_text(self, seat_id: int):
-        seat = next(seat for seat in self.seats_cache if seat.id == seat_id)
+        seat = next((s for s in self.seats_cache if s.id == seat_id), None)
+        if seat is None:
+            return ""
         if not seat.is_active:
             return f"{seat.label}\nNEAKTIVNÍ"
         student_id = self.current_assignments.get(seat_id)
-        student_name = self.student_names_by_id.get(student_id, "—") if student_id else "—"
+        student_name = self.student_names_by_id.get(student_id, "-") if student_id else "-"
         lock_marker = "🔒" if self.locked_assignments.get(seat_id) == student_id and student_id is not None else ""
         return f"{seat.label} {lock_marker}\n{student_name}"
 
@@ -828,7 +1104,7 @@ class SeatingApp(tk.Tk):
         indices = self.students_list.curselection()
         if not indices:
             self.selected_student_id = None
-            self.selected_var.set("Vybraný žák: —")
+            self.selected_var.set("Vybraný žák: -")
             return
         student = self.students_cache[indices[0]]
         self.selected_student_id = student.id
@@ -848,11 +1124,11 @@ class SeatingApp(tk.Tk):
         if self.selected_student_id is None:
             self.unassign_seat(seat_id)
             return
-        current_seat_of_student = next((sid for sid, stu in self.current_assignments.items() if stu == self.selected_student_id), None)
-        current_student_on_target = self.current_assignments.get(seat_id)
+        current_seat = next((sid for sid, stu in self.current_assignments.items() if stu == self.selected_student_id), None)
+        displaced_student = self.current_assignments.get(seat_id)
         self.current_assignments[seat_id] = self.selected_student_id
-        if current_seat_of_student is not None and current_seat_of_student != seat_id:
-            self.current_assignments[current_seat_of_student] = current_student_on_target
+        if current_seat is not None and current_seat != seat_id:
+            self.current_assignments[current_seat] = displaced_student
         self.current_mode = "manual"
         self.mode_var.set("Režim: manual")
         self.update_grid_visuals()
@@ -870,12 +1146,8 @@ class SeatingApp(tk.Tk):
         if not self.current_classroom_id:
             return
         self.layout_edit_mode = not self.layout_edit_mode
-        if self.layout_edit_mode:
-            self.layout_button_var.set("Ukončit úpravu učebny")
-            self.layout_mode_var.set("Režim učebny: zapnutý")
-        else:
-            self.layout_button_var.set("Upravit učebnu")
-            self.layout_mode_var.set("Režim učebny: vypnutý")
+        self.layout_button_var.set("Ukončit úpravu učebny" if self.layout_edit_mode else "Upravit učebnu")
+        self.layout_mode_var.set("Režim učebny: zapnutý" if self.layout_edit_mode else "Režim učebny: vypnutý")
         self.update_grid_visuals()
 
     def toggle_seat_active(self, seat_id: int):
@@ -901,7 +1173,7 @@ class SeatingApp(tk.Tk):
         if not self.current_classroom_id:
             return
         self.db.activate_all_seats(self.current_classroom_id)
-        self.seats_cache = [Seat(s.id, s.row_index, s.col_index, s.label, True) for s in self.seats_cache]
+        self.seats_cache = [Seat(seat.id, seat.row_index, seat.col_index, seat.label, True) for seat in self.seats_cache]
         for seat in self.seats_cache:
             self.current_assignments.setdefault(seat.id, None)
         self.normalize_assignments()
@@ -967,10 +1239,12 @@ class SeatingApp(tk.Tk):
         if not self.current_classroom_id:
             return
         engine = self.build_engine()
-        arrangement, _ = engine.best_of_random_search(iterations=2500)
+        active_seat_count = sum(1 for seat in self.seats_cache if seat.is_active)
+        iterations = engine.recommend_iterations(len(self.students_cache), active_seat_count)
+        arrangement, _ = engine.best_of_random_search(iterations=iterations)
         self.current_assignments = arrangement
         self.current_mode = "smart"
-        self.mode_var.set("Režim: smart")
+        self.mode_var.set(f"Režim: smart ({iterations} pokusů)")
         self.update_grid_visuals()
         self.recompute_score()
 
@@ -993,9 +1267,9 @@ class SeatingApp(tk.Tk):
         if self.locked_assignments.get(seat_id) == student_id:
             self.locked_assignments.pop(seat_id, None)
         else:
-            for sid, locked_student in list(self.locked_assignments.items()):
+            for s_id, locked_student in list(self.locked_assignments.items()):
                 if locked_student == student_id:
-                    self.locked_assignments.pop(sid, None)
+                    self.locked_assignments.pop(s_id, None)
             self.locked_assignments[seat_id] = student_id
         self.update_grid_visuals()
         self.recompute_score()
@@ -1013,42 +1287,266 @@ class SeatingApp(tk.Tk):
         self.update_grid_visuals()
         messagebox.showinfo("Uloženo", "Zámky byly uloženy pro další generování.")
 
+    def show_selected_student_insights(self):
+        if not self.current_classroom_id:
+            messagebox.showwarning("Bez třídy", "Nejprve načti třídu.")
+            return
+        if self.selected_student_id is None:
+            messagebox.showwarning("Bez výběru", "Vyber žáka v levém seznamu.")
+            return
+
+        student_name = self.student_names_by_id.get(self.selected_student_id, str(self.selected_student_id))
+        pair_rows = self.db.get_student_pair_insights(self.current_classroom_id, self.selected_student_id, limit=30)
+        seat_rows = self.db.get_student_seat_insights(self.current_classroom_id, self.selected_student_id, limit=20)
+
+        dialog = tk.Toplevel(self)
+        dialog.title(f"Přehled vazeb: {student_name}")
+        dialog.transient(self)
+        dialog.grab_set()
+        dialog.geometry("880x620")
+
+        header = ttk.Label(
+            dialog,
+            text=f"Přehled žáka: {student_name} | párové vazby: {len(pair_rows)} | poziční vazby: {len(seat_rows)}",
+        )
+        header.pack(anchor="w", padx=10, pady=(10, 6))
+
+        pair_box = ttk.LabelFrame(dialog, text="Sousedi a spolužáci")
+        pair_box.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        pair_tree = ttk.Treeview(pair_box, columns=("student", "prox", "score", "obs"), show="headings", height=10)
+        pair_tree.heading("student", text="Spolužák")
+        pair_tree.heading("prox", text="Typ")
+        pair_tree.heading("score", text="Průměr")
+        pair_tree.heading("obs", text="Pozorování")
+        pair_tree.column("student", width=280)
+        pair_tree.column("prox", width=120, anchor="center")
+        pair_tree.column("score", width=110, anchor="e")
+        pair_tree.column("obs", width=110, anchor="e")
+        pair_tree.pack(fill="both", expand=True, padx=8, pady=8)
+
+        for row in pair_rows:
+            if row["proximity"] == "side":
+                prox = "vedle sebe"
+            elif row["proximity"] == "front_back":
+                prox = "před/za"
+            else:
+                prox = "diagonálně"
+            other_name = self.student_names_by_id.get(row["other_student_id"], str(row["other_student_id"]))
+            pair_tree.insert("", "end", values=(other_name, prox, f"{row['avg_score']:+.2f}", row["observations"]))
+
+        seat_box = ttk.LabelFrame(dialog, text="Oblíbené / problematické pozice")
+        seat_box.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        seat_tree = ttk.Treeview(seat_box, columns=("seat", "score", "obs"), show="headings", height=8)
+        seat_tree.heading("seat", text="Místo")
+        seat_tree.heading("score", text="Průměr")
+        seat_tree.heading("obs", text="Pozorování")
+        seat_tree.column("seat", width=240)
+        seat_tree.column("score", width=110, anchor="e")
+        seat_tree.column("obs", width=110, anchor="e")
+        seat_tree.pack(fill="both", expand=True, padx=8, pady=8)
+
+        for row in seat_rows:
+            seat_tree.insert("", "end", values=(row["seat_label"], f"{row['avg_score']:+.2f}", row["observations"]))
+
+        if not pair_rows and not seat_rows:
+            ttk.Label(
+                dialog,
+                text="Zatím nejsou k dispozici žádná historická data pro tohoto žáka.",
+            ).pack(anchor="w", padx=10, pady=(0, 10))
+
+    def ensure_unlocked_on_start(self):
+        pin_hash = self.db.get_setting(PIN_HASH_SETTING_KEY)
+        if not pin_hash:
+            return
+        if not self.prompt_unlock_dialog("Aplikace je uzamčena. Zadej PIN pro pokračování.", allow_cancel=False):
+            self.after(0, self.on_close)
+
+    def configure_pin(self):
+        dialog = tk.Toplevel(self)
+        dialog.title("Nastavení PIN")
+        dialog.transient(self)
+        dialog.grab_set()
+
+        existing_hash = self.db.get_setting(PIN_HASH_SETTING_KEY)
+        current_var = tk.StringVar()
+        new_var = tk.StringVar()
+        confirm_var = tk.StringVar()
+
+        row = 0
+        ttk.Label(dialog, text="Nastavení lokálního PINu aplikace").grid(row=row, column=0, columnspan=2, sticky="w", padx=10, pady=(10, 8))
+        row += 1
+
+        if existing_hash:
+            ttk.Label(dialog, text="Aktuální PIN:").grid(row=row, column=0, sticky="w", padx=10, pady=5)
+            ttk.Entry(dialog, textvariable=current_var, show="*", width=22).grid(row=row, column=1, sticky="w", padx=10, pady=5)
+            row += 1
+
+        ttk.Label(dialog, text="Nový PIN (min. 4 číslice):").grid(row=row, column=0, sticky="w", padx=10, pady=5)
+        ttk.Entry(dialog, textvariable=new_var, show="*", width=22).grid(row=row, column=1, sticky="w", padx=10, pady=5)
+        row += 1
+        ttk.Label(dialog, text="Potvrzení PINu:").grid(row=row, column=0, sticky="w", padx=10, pady=5)
+        ttk.Entry(dialog, textvariable=confirm_var, show="*", width=22).grid(row=row, column=1, sticky="w", padx=10, pady=5)
+        row += 1
+
+        buttons = ttk.Frame(dialog)
+        buttons.grid(row=row, column=0, columnspan=2, sticky="e", padx=10, pady=(10, 10))
+
+        def on_save():
+            if existing_hash and hash_pin(current_var.get().strip()) != existing_hash:
+                messagebox.showerror("Chybný PIN", "Aktuální PIN nesouhlasí.")
+                return
+            new_pin = new_var.get().strip()
+            confirm_pin = confirm_var.get().strip()
+            if len(new_pin) < 4 or not new_pin.isdigit():
+                messagebox.showerror("Neplatný PIN", "PIN musí mít alespoň 4 číslice.")
+                return
+            if new_pin != confirm_pin:
+                messagebox.showerror("Neshoda", "Nový PIN a potvrzení se neshodují.")
+                return
+            self.db.set_setting(PIN_HASH_SETTING_KEY, hash_pin(new_pin))
+            messagebox.showinfo("Uloženo", "PIN byl nastaven.")
+            dialog.destroy()
+
+        def on_remove():
+            if not existing_hash:
+                return
+            if hash_pin(current_var.get().strip()) != existing_hash:
+                messagebox.showerror("Chybný PIN", "Aktuální PIN nesouhlasí.")
+                return
+            if not messagebox.askyesno("Odebrat PIN", "Opravdu chceš odstranit PIN ochranu aplikace?"):
+                return
+            self.db.set_setting(PIN_HASH_SETTING_KEY, "")
+            messagebox.showinfo("Hotovo", "PIN byl odstraněn.")
+            dialog.destroy()
+
+        ttk.Button(buttons, text="Uložit PIN", command=on_save).pack(side="right", padx=4)
+        if existing_hash:
+            ttk.Button(buttons, text="Odebrat PIN", command=on_remove).pack(side="right", padx=4)
+        ttk.Button(buttons, text="Zavřít", command=dialog.destroy).pack(side="right", padx=4)
+
+    def open_settings_dialog(self):
+        dialog = tk.Toplevel(self)
+        dialog.title("Nastavení")
+        dialog.transient(self)
+        dialog.grab_set()
+
+        ttk.Label(dialog, text="Nastavení aplikace", font=("TkDefaultFont", 10, "bold")).pack(anchor="w", padx=10, pady=(10, 8))
+        ttk.Label(
+            dialog,
+            text="PIN ochrana je lokální a volitelná. Pokud ji nechceš používat, nech ji vypnutou.",
+            wraplength=420,
+            justify="left",
+        ).pack(anchor="w", padx=10, pady=(0, 10))
+
+        controls = ttk.Frame(dialog)
+        controls.pack(fill="x", padx=10, pady=(0, 10))
+        ttk.Button(controls, text="Nastavit / změnit PIN", command=self.configure_pin).pack(side="left", padx=(0, 8))
+        ttk.Button(controls, text="Zamknout aplikaci", command=self.lock_app).pack(side="left", padx=(0, 8))
+        ttk.Button(controls, text="Archivace starých dat", command=self.purge_old_data).pack(side="left", padx=(0, 8))
+        ttk.Button(controls, text="Zavřít", command=dialog.destroy).pack(side="right")
+
+    def purge_old_data(self):
+        months = simpledialog.askinteger(
+            "Archivace dat",
+            "Smazat historii rozesazení starší než kolik měsíců?\n(Doporučeno: 12)",
+            minvalue=1,
+            maxvalue=120,
+            initialvalue=12,
+            parent=self,
+        )
+        if months is None:
+            return
+        cutoff = datetime.now() - timedelta(days=30 * months)
+        cutoff_iso = cutoff.isoformat(timespec="seconds")
+        deleted = self.db.delete_arrangements_older_than(cutoff_iso)
+        self.refresh_history()
+        messagebox.showinfo(
+            "Archivace hotová",
+            f"Smazané záznamy historie: {deleted}\nHranice: {cutoff.strftime('%Y-%m-%d')}",
+        )
+
+    def prompt_unlock_dialog(self, message: str, allow_cancel: bool = True) -> bool:
+        pin_hash = self.db.get_setting(PIN_HASH_SETTING_KEY)
+        if not pin_hash:
+            return True
+
+        dialog = tk.Toplevel(self)
+        dialog.title("Odemknout aplikaci")
+        dialog.transient(self)
+        dialog.grab_set()
+
+        ttk.Label(dialog, text=message, wraplength=360, justify="left").grid(row=0, column=0, columnspan=2, sticky="w", padx=10, pady=(10, 8))
+        pin_var = tk.StringVar()
+        ttk.Label(dialog, text="PIN:").grid(row=1, column=0, sticky="w", padx=10, pady=6)
+        ttk.Entry(dialog, textvariable=pin_var, show="*", width=22).grid(row=1, column=1, sticky="w", padx=10, pady=6)
+
+        result = {"ok": False}
+
+        def on_unlock():
+            if hash_pin(pin_var.get().strip()) == pin_hash:
+                result["ok"] = True
+                dialog.destroy()
+            else:
+                messagebox.showerror("Chybný PIN", "PIN není správný.")
+
+        def on_cancel():
+            result["ok"] = False
+            dialog.destroy()
+
+        buttons = ttk.Frame(dialog)
+        buttons.grid(row=2, column=0, columnspan=2, sticky="e", padx=10, pady=(4, 10))
+        ttk.Button(buttons, text="Odemknout", command=on_unlock).pack(side="right", padx=4)
+        if allow_cancel:
+            ttk.Button(buttons, text="Zrušit", command=on_cancel).pack(side="right", padx=4)
+
+        if not allow_cancel:
+            dialog.protocol("WM_DELETE_WINDOW", lambda: None)
+        else:
+            dialog.protocol("WM_DELETE_WINDOW", on_cancel)
+
+        self.wait_window(dialog)
+        return result["ok"]
+
+    def lock_app(self):
+        pin_hash = self.db.get_setting(PIN_HASH_SETTING_KEY)
+        if not pin_hash:
+            messagebox.showinfo("Bez PINu", "Nejprve nastav PIN přes tlačítko 'Nastavit PIN'.")
+            return
+        self.prompt_unlock_dialog("Aplikace je uzamčena. Pro odemknutí zadej PIN.", allow_cancel=False)
+
     def refresh_explanation(self, analysis=None):
         for item in self.explanation_tree.get_children():
             self.explanation_tree.delete(item)
-
         analysis = analysis if analysis is not None else self.last_analysis
         if analysis is None:
             self.explanation_summary_var.set("Zatím není co vysvětlovat.")
             return
-
-        seat_total = analysis["seat_total"]
-        pair_total = analysis["pair_total"]
-        seat_count = len(analysis["seat_terms"])
-        pair_count = len(analysis["pair_terms"])
         self.explanation_summary_var.set(
-            f"Součet pozic: {seat_total:+.2f} | součet sousedství: {pair_total:+.2f} | "
-            f"známé vazby v návrhu: {seat_count + pair_count}"
+            f"Součet pozic: {analysis['seat_total']:+.2f} | součet sousedství: {analysis['pair_total']:+.2f} | známé vazby v návrhu: {len(analysis['seat_terms']) + len(analysis['pair_terms'])}"
         )
-
         combined = []
+        seat_map = {seat.id: seat for seat in self.seats_cache}
         for term in analysis["seat_terms"]:
-            seat_label = next((s.label for s in self.seats_cache if s.id == term["seat_id"]), str(term["seat_id"]))
+            seat = seat_map.get(term["seat_id"])
+            seat_label = seat.label if seat else str(term["seat_id"])
             student_name = self.student_names_by_id.get(term["student_id"], str(term["student_id"]))
             combined.append((abs(term["contribution"]), "Pozice", f"{student_name} na {seat_label}", term["contribution"]))
         for term in analysis["pair_terms"]:
-            proximity = "vedle sebe" if term["proximity"] == "side" else "před/za"
+            if term["proximity"] == "side":
+                prox = "vedle sebe"
+            elif term["proximity"] == "front_back":
+                prox = "před/za"
+            else:
+                prox = "diagonálně"
             a_name = self.student_names_by_id.get(term["student_a_id"], str(term["student_a_id"]))
             b_name = self.student_names_by_id.get(term["student_b_id"], str(term["student_b_id"]))
-            combined.append((abs(term["contribution"]), "Dvojice", f"{a_name} × {b_name} ({proximity})", term["contribution"]))
-
+            combined.append((abs(term["contribution"]), "Dvojice", f"{a_name} × {b_name} ({prox})", term["contribution"]))
         if not combined:
             self.explanation_summary_var.set(
                 "Tento návrh zatím nemá žádné známé plusové ani minusové vazby. Random a smart proto mohou vycházet podobně."
             )
             return
-
-        combined.sort(key=lambda item: item[0], reverse=True)
+        combined.sort(key=lambda x: x[0], reverse=True)
         for _, typ, item_text, contribution in combined[:12]:
             self.explanation_tree.insert("", "end", values=(typ, item_text, f"{contribution:+.2f}"))
 
@@ -1070,12 +1568,10 @@ class SeatingApp(tk.Tk):
         if not any(self.current_assignments.values()):
             messagebox.showwarning("Bez rozesazení", "Nejprve rozmísti žáky.")
             return
-
         dialog = RatingDialog(self, self.students_cache, self.student_names_by_id)
         self.wait_window(dialog)
         if dialog.result is None:
             return
-
         arrangement_id = self.db.save_arrangement(
             self.current_classroom_id,
             self.current_mode,
@@ -1102,7 +1598,7 @@ class SeatingApp(tk.Tk):
         if not self.current_classroom_id:
             return
         for row in self.db.list_recent_arrangements(self.current_classroom_id, limit=20):
-            rating = "—" if row["overall_rating"] is None else row["overall_rating"]
+            rating = "-" if row["overall_rating"] is None else row["overall_rating"]
             self.history_tree.insert("", "end", iid=str(row["id"]), values=(row["created_at"].replace("T", " "), row["mode"], rating))
 
     def load_selected_history(self):
@@ -1116,6 +1612,94 @@ class SeatingApp(tk.Tk):
         self.mode_var.set("Režim: history")
         self.update_grid_visuals()
         self.recompute_score()
+
+    def export_current_pdf(self):
+        if not self.current_classroom_id:
+            return
+        if not self.seats_cache:
+            messagebox.showwarning("Bez třídy", "Nejprve načti třídu.")
+            return
+        classroom = self.db.get_classroom(self.current_classroom_id)
+        safe_name = classroom["name"].replace(" ", "_") if classroom else "trida"
+        default_name = f"zasedaci_poradek_{safe_name}_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
+        path = filedialog.asksaveasfilename(
+            title="Exportovat do PDF",
+            defaultextension=".pdf",
+            initialfile=default_name,
+            filetypes=[("PDF", "*.pdf")],
+        )
+        if not path:
+            return
+        try:
+            export_arrangement_pdf(
+                path,
+                classroom["name"] if classroom else "Třída",
+                self.current_mode,
+                self.last_analysis["total"] if self.last_analysis else 0.0,
+                self.seats_cache,
+                self.current_assignments,
+                self.student_names_by_id,
+                self.last_analysis,
+            )
+        except Exception as e:
+            messagebox.showerror("Chyba exportu", f"PDF se nepodařilo vytvořit.\n\n{e}")
+            return
+        messagebox.showinfo("Export hotov", f"PDF bylo uloženo:\n{path}")
+
+    def backup_database(self):
+        default_name = f"seating_app_backup_{datetime.now().strftime('%Y%m%d_%H%M')}.db"
+        path = filedialog.asksaveasfilename(
+            title="Uložit zálohu databáze",
+            defaultextension=".db",
+            initialfile=default_name,
+            filetypes=[("Databáze SQLite", "*.db"), ("Všechny soubory", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            self.db.conn.commit()
+            shutil.copy2(DB_PATH, path)
+        except Exception as e:
+            messagebox.showerror("Chyba zálohy", f"Zálohu se nepodařilo uložit.\n\n{e}")
+            return
+        messagebox.showinfo("Záloha hotová", f"Databáze byla zazálohována do:\n{path}")
+
+    def restore_database(self):
+        path = filedialog.askopenfilename(
+            title="Obnovit databázi ze zálohy",
+            filetypes=[("Databáze SQLite", "*.db"), ("Všechny soubory", "*.*")],
+        )
+        if not path:
+            return
+        if not messagebox.askyesno(
+            "Obnovit databázi",
+            "Opravdu chceš přepsat aktuální lokální databázi vybranou zálohou? Tato akce nelze vrátit zpět.",
+        ):
+            return
+        try:
+            self.db.close()
+            shutil.copy2(path, DB_PATH)
+            self.db = Database(DB_PATH)
+            self.current_classroom_id = None
+            self.current_assignments = {}
+            self.locked_assignments = {}
+            self.students_cache = []
+            self.seats_cache = []
+            self.student_names_by_id = {}
+            self.last_analysis = None
+            self.classroom_combo.set("")
+            self.refresh_classrooms()
+            self.render_grid()
+            self.refresh_history()
+            self.recompute_score()
+        except Exception as e:
+            try:
+                self.db = Database(DB_PATH)
+            except Exception:
+                pass
+            messagebox.showerror("Chyba obnovy", f"Databázi se nepodařilo obnovit.\n\n{e}")
+            return
+        messagebox.showinfo("Obnova hotová", "Databáze byla obnovena ze zálohy.")
 
     def on_close(self):
         self.db.close()
