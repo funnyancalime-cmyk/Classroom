@@ -1,0 +1,4 @@
+rows,cols,students,recommended_iter,time_avg_s,time_min_s,time_max_s,score_avg
+4,5,16,2800,0.35,0.35,0.35,20.0
+5,6,26,4000,0.85,0.85,0.85,20.0
+6,6,30,4720,1.20,1.20,1.20,20.0

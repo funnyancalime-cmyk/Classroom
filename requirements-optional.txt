@@ -1,0 +1,4 @@
+# Volitelné závislosti pro rozšířené funkce.
+# Základní aplikace (Tkinter + sqlite3) běží bez nich.
+
+reportlab>=4.0
