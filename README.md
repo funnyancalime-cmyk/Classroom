@@ -12,6 +12,7 @@ Lokální desktopová aplikace v Pythonu/Tkinteru pro tvorbu zasedacího pořád
 - uzamknout konkrétní usazení pro další generování
 - po hodině ohodnotit celé rozesazení a jen vybrané žáky
 - průběžně ukládat párové a poziční skóre do SQLite
+- rozlišovat sousedství: vedle sebe / před-za / diagonálně
 - zobrazit poslední rozesazení a znovu je načíst
 - vypínat a zapínat konkrétní místa v učebně (uličky, kouty, laboratorní stoly)
 - rozebrat skóre návrhu na konkrétní pozice a dvojice

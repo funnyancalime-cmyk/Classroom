@@ -43,7 +43,7 @@
 ## Etapa 6 - další vhodné kroky
 
 - [x] lokální heslo k aplikaci
-- [ ] jemnější model sousedství a vah
+- [x] jemnější model sousedství a vah
 - [x] silnější optimalizační jádro než best-of-random
 - [x] filtr a přehled vztahů pro vybraného žáka
 - [x] archivace / mazání starých dat podle období

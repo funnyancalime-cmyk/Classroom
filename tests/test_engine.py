@@ -96,6 +96,20 @@ class SeatingEngineTests(unittest.TestCase):
         self.assertEqual(improved[1], 10)
         self.assertGreaterEqual(improved_score, base_score)
 
+    def test_diagonal_neighbor_pair_is_scored(self):
+        pair_scores = {(10, 11, "diagonal"): (1.5, 2)}
+        engine = SeatingEngine(
+            seats=self.seats,
+            students=self.students,
+            pair_scores=pair_scores,
+            seat_scores={},
+            locked={},
+        )
+        arrangement = {1: 10, 2: None, 3: None, 4: 11}
+        analysis = engine.analyze_arrangement(arrangement)
+        self.assertGreater(analysis["pair_total"], 0.0)
+        self.assertEqual(len(analysis["pair_terms"]), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -479,7 +479,16 @@ class Database:
         for seat in seats:
             if not seat.is_active:
                 continue
-            for delta, proximity in [((0, -1), "side"), ((0, 1), "side"), ((-1, 0), "front_back"), ((1, 0), "front_back")]:
+            for delta, proximity in [
+                ((0, -1), "side"),
+                ((0, 1), "side"),
+                ((-1, 0), "front_back"),
+                ((1, 0), "front_back"),
+                ((-1, -1), "diagonal"),
+                ((-1, 1), "diagonal"),
+                ((1, -1), "diagonal"),
+                ((1, 1), "diagonal"),
+            ]:
                 target = (seat.row_index + delta[0], seat.col_index + delta[1])
                 if target in seat_index:
                     neighbors[seat.id].append((proximity, seat_index[target]))
@@ -525,7 +534,7 @@ class Database:
                     continue
                 self._upsert_avg("seat_scores", (classroom_id, student_id, seat_id), rating * 0.8)
                 for proximity, other_student_id in self._iter_neighbors(occupied, neighbors, seat_id):
-                    factor = 1.0 if proximity == "side" else 0.5
+                    factor = 1.0 if proximity == "side" else (0.5 if proximity == "front_back" else 0.35)
                     a, b = sorted((student_id, other_student_id))
                     self._upsert_avg("pair_scores", (classroom_id, a, b, proximity), rating * factor)
 
@@ -621,7 +630,16 @@ class SeatingEngine:
         seat_index = {(seat.row_index, seat.col_index): seat.id for seat in seats}
         neighbors = defaultdict(list)
         for seat in seats:
-            for delta, proximity in [((0, -1), "side"), ((0, 1), "side"), ((-1, 0), "front_back"), ((1, 0), "front_back")]:
+            for delta, proximity in [
+                ((0, -1), "side"),
+                ((0, 1), "side"),
+                ((-1, 0), "front_back"),
+                ((1, 0), "front_back"),
+                ((-1, -1), "diagonal"),
+                ((-1, 1), "diagonal"),
+                ((1, -1), "diagonal"),
+                ((1, 1), "diagonal"),
+            ]:
                 target = (seat.row_index + delta[0], seat.col_index + delta[1])
                 if target in seat_index:
                     neighbors[seat.id].append((proximity, seat_index[target]))
@@ -1307,7 +1325,12 @@ class SeatingApp(tk.Tk):
         pair_tree.pack(fill="both", expand=True, padx=8, pady=8)
 
         for row in pair_rows:
-            prox = "vedle sebe" if row["proximity"] == "side" else "před/za"
+            if row["proximity"] == "side":
+                prox = "vedle sebe"
+            elif row["proximity"] == "front_back":
+                prox = "před/za"
+            else:
+                prox = "diagonálně"
             other_name = self.student_names_by_id.get(row["other_student_id"], str(row["other_student_id"]))
             pair_tree.insert("", "end", values=(other_name, prox, f"{row['avg_score']:+.2f}", row["observations"]))
 
@@ -1509,7 +1532,12 @@ class SeatingApp(tk.Tk):
             student_name = self.student_names_by_id.get(term["student_id"], str(term["student_id"]))
             combined.append((abs(term["contribution"]), "Pozice", f"{student_name} na {seat_label}", term["contribution"]))
         for term in analysis["pair_terms"]:
-            prox = "vedle sebe" if term["proximity"] == "side" else "před/za"
+            if term["proximity"] == "side":
+                prox = "vedle sebe"
+            elif term["proximity"] == "front_back":
+                prox = "před/za"
+            else:
+                prox = "diagonálně"
             a_name = self.student_names_by_id.get(term["student_a_id"], str(term["student_a_id"]))
             b_name = self.student_names_by_id.get(term["student_b_id"], str(term["student_b_id"]))
             combined.append((abs(term["contribution"]), "Dvojice", f"{a_name} × {b_name} ({prox})", term["contribution"]))
