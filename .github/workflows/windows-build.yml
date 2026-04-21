@@ -1,0 +1,43 @@
+name: Windows Build
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-windows-exe:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install build dependencies
+        run: pip install -r requirements-build.txt
+
+      - name: Build exe
+        shell: cmd
+        run: scripts\\build_windows.bat
+
+      - name: Upload executable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SeatingOrder-exe
+          path: dist/SeatingOrder.exe
+
+      - name: Install Inno Setup
+        shell: powershell
+        run: choco install innosetup -y --no-progress
+
+      - name: Build installer
+        shell: cmd
+        run: scripts\\build_installer_windows.bat
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SeatingOrder-installer
+          path: dist-installer/*.exe
