@@ -7,6 +7,7 @@ import hashlib
 import os
 import sys
 from collections import defaultdict
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -40,7 +41,7 @@ def database_path() -> Path:
 DB_PATH = database_path()
 
 
-def prepare_database(path: Path = DB_PATH) -> None:
+def prepare_database(path: Path) -> None:
     """On Windows, copy a legacy database beside the executable once."""
     if sys.platform != "win32":
         return
@@ -53,8 +54,8 @@ def prepare_database(path: Path = DB_PATH) -> None:
         return
     temporary = path.with_name(path.name + ".migrating")
     try:
-        with sqlite3.connect(f"file:{quote(legacy.as_posix(), safe='/')}?mode=ro", uri=True) as source:
-            with sqlite3.connect(temporary) as destination:
+        with closing(sqlite3.connect(f"file:{quote(legacy.as_posix(), safe='/')}?mode=ro", uri=True)) as source:
+            with closing(sqlite3.connect(temporary)) as destination:
                 source.backup(destination)
         temporary.replace(path)
     finally:
@@ -885,7 +886,7 @@ class SeatingApp(tk.Tk):
         self.title("Zasedací pořádek - lokální aplikace")
         self.geometry("1450x840")
 
-        prepare_database()
+        prepare_database(DB_PATH)
         self.db = Database(DB_PATH)
         self.current_classroom_id = None
         self.current_assignments: dict[int, int | None] = {}
