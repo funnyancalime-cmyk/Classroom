@@ -10,7 +10,7 @@ if not exist "dist\SeatingOrder.exe" (
 
 where iscc >nul 2>nul
 if %errorlevel% neq 0 (
-  echo Inno Setup Compiler (iscc) neni dostupny v PATH.
+  echo Inno Setup Compiler - iscc - neni dostupny v PATH.
   echo Nainstaluj Inno Setup a pridej ISCC.exe do PATH.
   exit /b 1
 )
