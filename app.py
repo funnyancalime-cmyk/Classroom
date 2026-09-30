@@ -4,10 +4,13 @@ import random
 import shutil
 import sqlite3
 import hashlib
+import os
+import sys
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
+from urllib.parse import quote
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, simpledialog
 
@@ -22,7 +25,40 @@ if REPORTLAB_AVAILABLE:
     from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 APP_DIR = Path(__file__).resolve().parent
-DB_PATH = APP_DIR / "seating_app.db"
+
+
+def database_path() -> Path:
+    """Keep mutable data in the Windows user's local application data folder."""
+    if sys.platform == "win32":
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        if not local_app_data:
+            local_app_data = str(Path.home() / "AppData" / "Local")
+        return Path(local_app_data) / "SeatingOrder" / "seating_app.db"
+    return APP_DIR / "seating_app.db"
+
+
+DB_PATH = database_path()
+
+
+def prepare_database(path: Path = DB_PATH) -> None:
+    """On Windows, copy a legacy database beside the executable once."""
+    if sys.platform != "win32":
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        return
+    legacy_dir = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else APP_DIR
+    legacy = legacy_dir / "seating_app.db"
+    if not legacy.is_file() or legacy == path:
+        return
+    temporary = path.with_name(path.name + ".migrating")
+    try:
+        with sqlite3.connect(f"file:{quote(legacy.as_posix(), safe='/')}?mode=ro", uri=True) as source:
+            with sqlite3.connect(temporary) as destination:
+                source.backup(destination)
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
 PIN_HASH_SETTING_KEY = "app_pin_hash"
 
 SCHEMA = """
@@ -849,6 +885,7 @@ class SeatingApp(tk.Tk):
         self.title("Zasedací pořádek - lokální aplikace")
         self.geometry("1450x840")
 
+        prepare_database()
         self.db = Database(DB_PATH)
         self.current_classroom_id = None
         self.current_assignments: dict[int, int | None] = {}

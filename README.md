@@ -38,7 +38,11 @@ Neukládá:
 - zdravotní údaje
 - slovní poznámky o chování
 
-Databáze je lokální soubor `seating_app.db` vedle aplikace.
+Ve Windows se databáze ukládá do `%LOCALAPPDATA%\SeatingOrder\seating_app.db`
+pro každého uživatele zvlášť. Při prvním spuštění se případná starší databáze
+vedle aplikace zkopíruje do tohoto umístění; původní soubor zůstane zachován.
+Pokud už v cílové složce databáze je, aplikace ji nepřepíše. Na ostatních
+systémech zůstává soubor `seating_app.db` vedle `app.py`.
 
 ## Spuštění
 

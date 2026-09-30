@@ -12,6 +12,8 @@ AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
 DefaultDirName={autopf}\{#MyAppName}
+; Only the executable is installed here. Runtime data is created per user in
+; {localappdata}\SeatingOrder by app.py and survives installer removal.
 DefaultGroupName={#MyAppName}
 OutputDir=..\..\dist-installer
 OutputBaseFilename=SeatingOrder-Setup

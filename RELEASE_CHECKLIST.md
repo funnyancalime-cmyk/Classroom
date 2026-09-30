@@ -23,6 +23,9 @@
 
 ## 3) Kontrola artefaktů
 
+- [ ] Windows: běžný uživatel spustí aplikaci z Program Files, založí třídu a po restartu ji znovu vidí v `%LOCALAPPDATA%\SeatingOrder\seating_app.db`
+- [ ] Windows: stará DB vedle exe se při prvním spuštění zkopíruje, existující DB v LocalAppData zůstane zachována; záloha/obnova funguje
+
 - [ ] (volitelně) Windows build: `scripts\\build_windows.bat`
 - [ ] (volitelně) Windows installer: `scripts\\build_installer_windows.bat`
 - [ ] (volitelně) cloud build: GitHub Actions `windows-build.yml` (exe + installer)
