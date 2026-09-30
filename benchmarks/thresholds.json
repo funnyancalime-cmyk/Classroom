@@ -1,0 +1,16 @@
+{
+  "scenarios": {
+    "4x5x16": {
+      "max_time_avg_s": 1.0,
+      "min_score_avg": 0.0
+    },
+    "5x6x26": {
+      "max_time_avg_s": 2.0,
+      "min_score_avg": 0.0
+    },
+    "6x6x30": {
+      "max_time_avg_s": 3.0,
+      "min_score_avg": 0.0
+    }
+  }
+}

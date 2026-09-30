@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install GUI deps (Linux)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-tk xvfb
+
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Compile check
+        run: python -m py_compile app.py
+
+      - name: Smart benchmark smoke
+        run: python scripts/benchmark_smart.py --rows 4 --cols 5 --students 16 --iterations 2
+
+      - name: Smart benchmark matrix smoke
+        run: python scripts/benchmark_matrix.py --seed 42 --repeats 1 --output benchmark-matrix.csv
+
+      - name: Benchmark regression guard
+        run: python scripts/check_benchmark_regression.py --benchmark-csv benchmark-matrix.csv --thresholds benchmarks/thresholds.json --baseline-csv benchmarks/baseline_matrix.csv --max-regression-pct 40
+
+      - name: Upload benchmark matrix artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-matrix-py${{ matrix.python-version }}
+          path: benchmark-matrix.csv
+
+      - name: GUI smoke (xvfb)
+        run: xvfb-run -a python scripts/gui_smoke.py --require-display

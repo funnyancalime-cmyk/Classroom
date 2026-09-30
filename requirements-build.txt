@@ -1,0 +1,3 @@
+# Volitelné závislosti pro vytvoření distribučního balíčku.
+
+pyinstaller>=6.0

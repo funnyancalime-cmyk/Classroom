@@ -1,0 +1,10 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Local app data
+seating_app.db
+
+# OS/editor files
+.DS_Store
+Thumbs.db
